@@ -31,8 +31,8 @@ Our implementation includes:
 
 ### Setup
 ```bash
-git clone https://github.com/[your-username]/heuristic-learning-reproduction.git
-cd heuristic-learning-reproduction
+[git clone https://github.com/[your-username]/heuristic-learning-reproduction.git]
+cd ai-reproducibility-assignment
 
 python -m venv venv
 source venv/bin/activate  # Windows: venv\Scripts\activate
