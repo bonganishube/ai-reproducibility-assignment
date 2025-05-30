@@ -1,44 +1,40 @@
-# ACML Project
 
-The project for AI requires you to analyse a dataset using machine learning techniques and present your methods and results. The specification can be found [here](./specification/ACML%20Project%202025.pdf).
+# Reproducibility Assignment: Utilising Uncertainty for Efficient Learning of Likely-Admissible Heuristics
 
-## Dataset
+This repository contains our reproduction of the paper *"Utilising uncertainty for efficient learning of likely-admissible heuristics"* by Ofir Maron and Benjamin Rosman (ICAPS 2020).
 
-The dataset being used for the project can be found at the [UC Irvine Machine Learning Repository](https://archive.ics.uci.edu/) and is the [Bank Marketing](https://archive.ics.uci.edu/dataset/222/bank+marketing) dataset.
+## Table of Contents
+- [Introduction](#introduction)
+- [Installation](#installation)
+- [Usage](#usage)
+- [Team](#team)
+- [Report](#report)
+- [License](#license)
 
-## File Structure
+## Introduction
 
-The report can be found [here](./report/ACML_Semester_Project.pdf).
+We reproduce the experiments from the paper that proposes:
+1. A method for learning likely-admissible heuristics using uncertainty estimates
+2. Techniques to improve heuristic search efficiency
+3. Evaluation across three planning environments
 
-The code for the different models can be found in the following directories:
-
-- [Logistic Regression](./logreg/)
-- [Decision Trees and Random Forests](./decision-trees/)
-- [Artificial Neural Network](./artificial-neural-network/)
+Our implementation includes:
+- Core algorithm reimplementation in Python
+- Experiments on all original environments
+- Additional hyperparameter analysis
 
 ## Installation
 
-In order to set up the project please run the following commands:
+### Prerequisites
+- Python ≥ 3.8
+- pip
 
-1. Set up a python virtual environment.
-
+### Setup
 ```bash
-python -m venv ACML-Project
-```
+git clone https://github.com/[your-username]/heuristic-learning-reproduction.git
+cd heuristic-learning-reproduction
 
-2. Activate the python virtual environment.
+python -m venv venv
+source venv/bin/activate  # Windows: venv\Scripts\activate
 
-```bash
-source ACML-Project/bin/activate
-```
-
-3. Install the dependencies.
-
-```bash
 pip install -r requirements.txt
-```
-
-## Team
-
-| ![Bongani Shube](pictures/bongani.jpeg "Bongani Shube") <br/> [Bongani Shube](https://www.linkedin.com/in/bonganishube/) | ![Jason Wille](pictures/jason.jpeg "Jason Wille") <br/> [Jason Wille](https://www.linkedin.com/in/jasonwille97/) | ![Preshen Goobiah](pictures/preshen.jpeg "Preshen Goobiah") <br/> [Preshen Goobiah](https://www.linkedin.com/in/preshen-goobiah-aa6b92149/) |
-| :--------------------------------------------------------------------------------------------------------------------: | :------------------------------------------------------------------------------------------------------------: | :---------------------------------------------------------------------------------------------------------------------------------------: |
