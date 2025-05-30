@@ -146,10 +146,11 @@ class WUNN(nn.Module):
         return np.var(outputs)
 
 class FFNN(nn.Module):
-    def __init__(self, input_dim, hidden_dim=8):
+    def __init__(self, input_dim, hidden_dim=8, dropout_rate=0.0):
         super().__init__()
         self.fc1 = nn.Linear(input_dim, hidden_dim)
-        self.fc2 = nn.Linear(hidden_dim, 2)
+        self.fc2 = nn.Linear(hidden_dim, 1)
+        self.dropout = nn.Dropout(dropout_rate)
         nn.init.kaiming_normal_(self.fc1.weight, mode="fan_in", nonlinearity="relu")
         nn.init.kaiming_normal_(self.fc2.weight, mode="fan_in", nonlinearity="relu")
         nn.init.zeros_(self.fc1.bias)
@@ -157,16 +158,8 @@ class FFNN(nn.Module):
 
     def forward(self, x):
         x = F.relu(self.fc1(x))
-        output = self.fc2(x)
-        mean = output[:, 0]
-        var = F.softplus(output[:, 1])
-        return mean, var
-
-    def predict(self, x):
-        self.eval()
-        with torch.no_grad():
-            mean, var = self.forward(x)
-            return mean.item(), var.item()
+        x = self.dropout(x)
+        return self.fc2(x).squeeze()
 
 class LearnHeuristicPrac:
     def __init__(self, input_dim, goal_state, params):
@@ -176,39 +169,29 @@ class LearnHeuristicPrac:
             prior_mu=params["mu0"],
             prior_sigma=math.sqrt(params["sigma2_0"]),
         )
-        self.nnFFNN = FFNN(input_dim, params["hidden_dim"])        
-        self.alpha = params["alpha0"]
+        self.nnFFNN = FFNN(input_dim, params["hidden_dim"], params["dropout_rate"])
         self.beta = params["beta0"]
         self.epsilon = params["epsilon"]
-        self.delta = params["delta"]
         self.kappa = params["kappa"]
         self.gamma = (0.00001 / params["beta0"]) ** (1 / params["NumIter"])
-        self.q = params["q"]
         self.K = params["K"]
         self.max_steps = params["MaxSteps"]
         self.NumIter = params["NumIter"]
         self.NumTasksPerIter = params["NumTasksPerIter"]
-        self.NumTasksPerIterThresh = params["NumTasksPerIterThresh"]
         self.TrainIter = params["TrainIter"]
-        self.MaxTrainIter = params["MaxTrainIter"]
         self.MiniBatchSize = params["MiniBatchSize"]
         self.tmax = params["tmax"]
         self.memoryBuffer = deque(maxlen=params["MemoryBufferMaxRecords"])
         self.planner_costs = []
         self.optimal_costs = []
         self.planning_times = []
-        self.suboptimalities = []
         self.optimal_solutions_count = 0
         self.total_solved_tasks = 0
-        self.optimality_counts = 0
         self.goal_state = goal_state
-
-    def h(self, alpha, mu, sigma):
-        return mu + sigma * norm.ppf(alpha)
 
     def max_admissible_heuristic(self, state):
         x = encode_blocksworld_state(state, self.goal_state)
-        admissible_values = x[:13]  # f1-f13 are admissible
+        admissible_values = x[:12]  # f1-f12 are admissible
         return np.max(admissible_values)
 
     def generate_task(self):
@@ -282,31 +265,26 @@ class LearnHeuristicPrac:
             planning_time = time.time() - planning_start
             return None, total_nodes, planning_time
 
-    def uncertainty_aware_heuristic(self, state):
+    def heuristic(self, state):
         x = encode_blocksworld_state(state, self.goal_state)
         x_tensor = torch.tensor(x, dtype=torch.float32).unsqueeze(0)
         self.nnFFNN.eval()
         with torch.no_grad():
-            mean, logvar = self.nnFFNN(x_tensor)
-            y_hat = mean.item()
-            sigma2_a = torch.exp(logvar).item()
-        sigma2_t = sigma2_a if y_hat < self.yq else self.epsilon
-        h_val = self.h(self.alpha, y_hat, math.sqrt(sigma2_t))
-        had = self.max_admissible_heuristic(state)
-        return max(h_val, had)
+            y_hat = self.nnFFNN(x_tensor).item()
+        return max(y_hat, self.max_admissible_heuristic(state))
 
     def train_ffnn(self):
         if len(self.memoryBuffer) < self.MiniBatchSize:
             return
 
         optimizer = optim.Adam(self.nnFFNN.parameters())
-        criterion = nn.GaussianNLLLoss()
+        criterion = nn.MSELoss()
         x_data = torch.stack(
             [torch.tensor(x, dtype=torch.float32) for x, _ in self.memoryBuffer]
         )
         y_data = torch.tensor(
             [y for _, y in self.memoryBuffer], dtype=torch.float32
-        ).unsqueeze(1)
+        )
 
         self.nnFFNN.train()
         for _ in range(self.TrainIter):
@@ -315,8 +293,8 @@ class LearnHeuristicPrac:
                 indices = permutation[i : i + self.MiniBatchSize]
                 x_batch, y_batch = x_data[indices], y_data[indices]
                 optimizer.zero_grad()
-                mean, logvar = self.nnFFNN(x_batch)
-                loss = criterion(mean, y_batch, torch.exp(logvar))
+                output = self.nnFFNN(x_batch)
+                loss = criterion(output, y_batch)
                 loss.backward()
                 optimizer.step()
 
@@ -354,23 +332,11 @@ class LearnHeuristicPrac:
         if max_weight > 1e6:
             weights = [w/max_weight*1e6 for w in weights]
         
-        for iter in range(self.MaxTrainIter):
-            if iter % 10 == 0:
-                all_low_uncertainty = True
-                for x, _ in list(self.memoryBuffer)[:100]:
-                    sigma2_e = self.nnWUNN.predict_sigma_e(x, 10)
-                    if sigma2_e >= self.kappa * self.epsilon:
-                        all_low_uncertainty = False
-                        break
-                if all_low_uncertainty:
-                    early_stop = True
-                    break
-
+        for iter in range(100):
             batch_indices = random.choices(
                 range(len(self.memoryBuffer)),
                 weights=weights,
-                k=min(self.MiniBatchSize, len(self.memoryBuffer))
-            )
+                k=min(self.MiniBatchSize, len(self.memoryBuffer)))
             batch = [self.memoryBuffer[i] for i in batch_indices]
 
             total_loss = 0
@@ -379,7 +345,7 @@ class LearnHeuristicPrac:
                 y_tensor = torch.tensor([y], dtype=torch.float32).unsqueeze(1)
                 
                 preds = torch.stack(
-                    [self.nnWUNN.forward_single(x_tensor) for _ in range(self.nnWUNn.S)]
+                    [self.nnWUNN.forward_single(x_tensor) for _ in range(self.nnWUNN.S)]
                 )
                 pred_mean = preds.mean(dim=0)
                 
@@ -392,21 +358,15 @@ class LearnHeuristicPrac:
                 optimizer.step()
                 total_loss += loss.item()
 
+            if iter % 10 == 0:
+                if all(s < self.kappa * self.epsilon for s in uncertainties[:100]):
+                    early_stop = True
+                    break
+
         return early_stop
 
     def run(self):
-        self.yq = -np.inf
-        all_alphas = []
-        all_suboptimalities = []
-        all_optimal_rates = []
-        all_planning_times = []
-        all_nodes_generated = []
-        self.planner_costs = []
-        self.optimal_costs = []
-        self.optimal_solutions_count = 0
-        self.total_solved_tasks = 0
-
-        print("Iter\tα\tTime\tSubopt%\tOpt%\tGenerated")
+        print("Iter\tTime\tSubopt%\tOpt%\tGenerated")
 
         for n in range(1, self.NumIter + 1):
             iter_planner_costs = []
@@ -415,7 +375,7 @@ class LearnHeuristicPrac:
             iter_times = []
             iter_nodes = []
             
-            for i in range(self.NumTasksPerIter):
+            for _ in range(self.NumTasksPerIter):
                 try:
                     T = self.generate_task()
                     if not T:
@@ -424,7 +384,7 @@ class LearnHeuristicPrac:
                     start_time = time.time()
                     plan, nodes_generated, planning_time = self.ida_star(
                         T["s"], T["sg"], 
-                        self.uncertainty_aware_heuristic,
+                        self.heuristic,
                         self.tmax, start_time
                     )
                     
@@ -445,18 +405,15 @@ class LearnHeuristicPrac:
                         
                         for state in reversed(plan[:-1]):
                             x = encode_blocksworld_state(state, T["sg"])
-                            y = len(plan) - 1 - plan.index(state)
+                            y = count_out_of_place_blocks(state, T["sg"])
                             self.memoryBuffer.appendleft((x, y))
                             
                 except Exception as e:
-                    print(f"Error in task {i}: {str(e)}")
+                    print(f"Error in task: {str(e)}")
                     continue
 
-            if iter_solved_count < self.NumTasksPerIterThresh:
-                self.alpha = max(self.alpha - self.delta, 0.01)
-
             self.train_ffnn()
-            _ = self.train_wunn()
+            self.train_wunn()
             self.beta *= self.gamma
 
             if iter_solved_count > 0:
@@ -471,34 +428,19 @@ class LearnHeuristicPrac:
             avg_time_iter = np.mean(iter_times) if iter_times else 0
             avg_nodes_iter = np.mean(iter_nodes) if iter_nodes else 0
             
-            all_alphas.append(self.alpha)
-            if iter_solved_count > 0:
-                all_suboptimalities.append(avg_subopt_pct)
-                all_optimal_rates.append(opt_rate)
-            all_planning_times.append(avg_time_iter)
-            all_nodes_generated.append(avg_nodes_iter)
-            
-            print(f"{n}\t{self.alpha:.3f}\t{avg_time_iter:.2f}\t{avg_subopt_pct:.1f}%\t{opt_rate:.1f}%\t{avg_nodes_iter:.0f}")
-
-        final_avg_alpha = np.mean(all_alphas) if all_alphas else 0
-        final_avg_time = np.mean(all_planning_times) if all_planning_times else 0
-        final_avg_nodes = np.mean(all_nodes_generated) if all_nodes_generated else 0
-        valid_subopts = [s for s in all_suboptimalities if s != 0]
-        final_avg_subopt = np.mean(valid_subopts) if valid_subopts else 0
-        valid_opts = [o for o in all_optimal_rates if o != 0]
-        final_avg_opt = np.mean(valid_opts) if valid_opts else 0
+            print(f"{n}\t{avg_time_iter:.2f}\t{avg_subopt_pct:.1f}%\t{opt_rate:.1f}%\t{avg_nodes_iter:.0f}")
 
         if self.total_solved_tasks > 0:
-            global_subopt_pct = [((y/y_star)-1)*100 for y, y_star in zip(self.planner_costs, self.optimal_costs)]
-            global_avg_subopt = sum(global_subopt_pct)/len(global_subopt_pct) if global_subopt_pct else 0
-            global_opt_rate = (self.optimal_solutions_count/self.total_solved_tasks)*100
+            global_subopt = sum((y/y_star-1)*100 for y, y_star in zip(self.planner_costs, self.optimal_costs)) / self.total_solved_tasks
+            global_opt_rate = self.optimal_solutions_count / self.total_solved_tasks * 100
         else:
-            global_avg_subopt = 0
+            global_subopt = 0
             global_opt_rate = 0
 
-        print("\n=== Final Averages ===")
-        print("Iter\tα\tTime\tSubopt%\tOpt%\tGenerated")
-        print(f"All\t{final_avg_alpha:.3f}\t{final_avg_time:.2f}\t{final_avg_subopt:.1f}%\t{final_avg_opt:.1f}%\t{final_avg_nodes:.0f}")
+        print("\n=== Final Results ===")
+        print(f"Solved: {self.total_solved_tasks}/{self.NumIter*self.NumTasksPerIter}")
+        print(f"Suboptimality: {global_subopt:.1f}%")
+        print(f"Optimal solutions: {global_opt_rate:.1f}%")
 
 if __name__ == "__main__":
     # Define goal state for 15-blocksworld: all blocks in one stack
@@ -525,21 +467,16 @@ if __name__ == "__main__":
     params = {
         "hidden_dim": 8,
         "dropout_rate": 0.0,
-        "alpha0": 0.99,
         "beta0": 0.05,
         "epsilon": 1.0,
-        "delta": 0.05,
         "kappa": 0.64,
-        "q": 0.95,
         "K": 10,
         "MaxSteps": 1000,
         "mu0": 0.0,
         "sigma2_0": 10.0,
         "NumIter": 75,
         "NumTasksPerIter": 5,
-        "NumTasksPerIterThresh": 6,
         "TrainIter": 100,
-        "MaxTrainIter": 500,
         "MiniBatchSize": 32,
         "tmax": 10,  # 10 seconds per task
         "MemoryBufferMaxRecords": 5000,
