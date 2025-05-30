@@ -9,41 +9,92 @@ import time
 from scipy.stats import norm
 from collections import deque, defaultdict
 
-def encode_15puzzle_state(state):
-    encoded = np.zeros(16 * 2 * 4)
-    for tile in range(16):
-        idx = state.index(tile)
-        row, col = divmod(idx, 4)
-        encoded[tile * 8 + row] = 1
-        encoded[tile * 8 + 4 + col] = 1
-    return encoded
+# Define the PDB patterns for 5-blocksworld (12 4-block PDBs)
+PDB_PATTERNS = [
+    [1, 2, 3, 4],
+    [5, 6, 7, 8],
+    [9, 10, 11, 12],
+    [12, 13, 14, 15],
+    [3, 4, 5, 6],
+    [7, 8, 9, 10],
+    [11, 12, 13, 14],
+    [1, 2, 14, 15],
+    [2, 3, 4, 5],
+    [6, 7, 8, 9],
+    [10, 11, 12, 13],
+    [1, 13, 14, 15]
+]
 
-def get_valid_moves(state):
-    zero_index = state.index(0)
-    row, col = divmod(zero_index, 4)
+def count_out_of_place_blocks(state, goal_state):
+    return sum(1 for s, g in zip(state, goal_state) if s != g)
+
+def count_stacks(state):
+    # A stack is defined by a block with nothing on top of it
+    stacked_blocks = set()
+    for block, on_top in state.items():
+        if on_top is not None:
+            stacked_blocks.add(on_top)
+    return len(state) - len(stacked_blocks)
+
+def compute_pdb_heuristic(state, goal_state, pattern):
+    # For blocksworld, we need to calculate the minimum number of moves to get pattern blocks
+    # into their goal positions. This is a simplified version - a full PDB would require
+    # precomputing the entire pattern database.
+    distance = 0
+    for block in pattern:
+        # Simplified: count how many blocks are in the way of each pattern block
+        current_pos = state[block]
+        goal_pos = goal_state[block]
+        
+        # Count blocks above current position
+        if current_pos is not None:
+            above = current_pos
+            while above is not None:
+                if above in pattern:  # Only count if it's a pattern block
+                    distance += 1
+                above = state[above]
+        
+        # Count blocks above goal position
+        if goal_pos is not None:
+            above = goal_pos
+            while above is not None:
+                if above in pattern:  # Only count if it's a pattern block
+                    distance += 1
+                above = state[above]
+    return distance
+
+def encode_blocksworld_state(state, goal_state):
+    features = np.zeros(14)
+    
+    # Compute PDB features (f1-f12)
+    for i, pattern in enumerate(PDB_PATTERNS):
+        features[i] = compute_pdb_heuristic(state, goal_state, pattern)
+    
+    features[12] = count_out_of_place_blocks(state, goal_state)  # f13
+    features[13] = count_stacks(state)  # f14
+    
+    return features
+
+def get_valid_moves_blocksworld(state):
     valid_moves = []
-    directions = [(-1, 0), (1, 0), (0, -1), (0, 1)]
-    for dr, dc in directions:
-        new_row, new_col = row + dr, col + dc
-        if 0 <= new_row < 4 and 0 <= new_col < 4:
-            new_zero_index = new_row * 4 + new_col
-            new_state = state[:]
-            new_state[zero_index], new_state[new_zero_index] = (
-                new_state[new_zero_index],
-                new_state[zero_index],
-            )
+    # Find all blocks that can be moved (those with nothing on top)
+    movable_blocks = [block for block, on_top in state.items() if on_top is None]
+    
+    for block in movable_blocks:
+        # Can move to table (if not already there)
+        if state[block] is not None:
+            new_state = state.copy()
+            new_state[block] = None
             valid_moves.append(new_state)
+        
+        # Can move onto other blocks (that aren't this block)
+        for other_block in state:
+            if other_block != block and (state[other_block] is None or state[other_block] != block):
+                new_state = state.copy()
+                new_state[block] = other_block
+                valid_moves.append(new_state)
+    
     return valid_moves
-
-def manhattan_distance(state, goal_state):
-    total = 0
-    for i in range(1, 16):
-        curr_idx = state.index(i)
-        goal_idx = goal_state.index(i)
-        curr_row, curr_col = divmod(curr_idx, 4)
-        goal_row, goal_col = divmod(goal_idx, 4)
-        total += abs(curr_row - goal_row) + abs(curr_col - goal_col)
-    return total
 
 class BayesianLinear(nn.Module):
     def __init__(self, in_features, out_features, prior_mu=0.0, prior_sigma=1.0):
@@ -83,7 +134,7 @@ class BayesianLinear(nn.Module):
         return kl_weight.sum() + kl_bias.sum()
 
 class WUNN(nn.Module):
-    def __init__(self, input_dim, hidden_dim=20, S=5, prior_mu=0.0, prior_sigma=1.0):
+    def __init__(self, input_dim, hidden_dim=8, S=5, prior_mu=0.0, prior_sigma=1.0):
         super().__init__()
         self.S = S
         self.fc1 = BayesianLinear(input_dim, hidden_dim, prior_mu, prior_sigma)
@@ -101,11 +152,10 @@ class WUNN(nn.Module):
         return np.var(outputs)
 
 class FFNN(nn.Module):
-    def __init__(self, input_dim, hidden_dim=20, dropout_rate=0.025):
+    def __init__(self, input_dim, hidden_dim=8):
         super().__init__()
         self.fc1 = nn.Linear(input_dim, hidden_dim)
         self.fc2 = nn.Linear(hidden_dim, 2)
-        self.dropout = nn.Dropout(dropout_rate)
         nn.init.kaiming_normal_(self.fc1.weight, mode="fan_in", nonlinearity="relu")
         nn.init.kaiming_normal_(self.fc2.weight, mode="fan_in", nonlinearity="relu")
         nn.init.zeros_(self.fc1.bias)
@@ -113,7 +163,6 @@ class FFNN(nn.Module):
 
     def forward(self, x):
         x = F.relu(self.fc1(x))
-        x = self.dropout(x)
         output = self.fc2(x)
         mean = output[:, 0]
         var = F.softplus(output[:, 1])
@@ -133,7 +182,7 @@ class LearnHeuristicPrac:
             prior_mu=params["mu0"],
             prior_sigma=math.sqrt(params["sigma2_0"]),
         )
-        self.nnFFNN = FFNN(input_dim, params["hidden_dim"], params["dropout_rate"])        
+        self.nnFFNN = FFNN(input_dim, params["hidden_dim"])        
         self.alpha = params["alpha0"]
         self.beta = params["beta0"]
         self.epsilon = params["epsilon"]
@@ -163,43 +212,27 @@ class LearnHeuristicPrac:
     def h(self, alpha, mu, sigma):
         return mu + sigma * norm.ppf(alpha)
 
+    def max_admissible_heuristic(self, state):
+        x = encode_blocksworld_state(state, self.goal_state)
+        # Features 0-12 are all admissible heuristics (f1-f13)
+        admissible_values = x[:13]
+        return np.max(admissible_values)
+
     def generate_task(self):
-        s_prime = self.goal_state[:]
-        s_double_prime = None
-
-        for _ in range(self.max_steps):
-            states = {}
-            valid_moves = get_valid_moves(s_prime)
-
-            for s in valid_moves:
-                if s_double_prime is not None and s == s_double_prime:
-                    continue
-
-                x = encode_15puzzle_state(s)
-                sigma2_e = self.nnWUNN.predict_sigma_e(x, self.K)
-                states[tuple(s)] = sigma2_e
-
-            if not states:
-                break
-
-            states_list = list(states.items())
-            state_tuples, sigmas = zip(*states_list)
-            probs = F.softmax(torch.tensor(sigmas), dim=0).numpy()
-            selected_idx = np.random.choice(len(state_tuples), p=probs)
-            selected_state = list(state_tuples[selected_idx])
-            selected_sigma = sigmas[selected_idx]
-
-            if selected_sigma >= self.epsilon:
-                return {
-                    "s": selected_state,
-                    "sg": self.goal_state,
-                    "sigma2_e": selected_sigma,
-                }
-
-            s_double_prime = s_prime
-            s_prime = selected_state
-
-        return None
+        # Generate a random blocksworld task
+        blocks = list(self.goal_state.keys())
+        
+        # Start from goal state and perform random moves
+        state = self.goal_state.copy()
+        for _ in range(random.randint(10, 30)):  # Perform 10-30 random moves
+            valid_moves = get_valid_moves_blocksworld(state)
+            state = random.choice(valid_moves)
+        
+        return {
+            "s": state,
+            "sg": self.goal_state,
+            "sigma2_e": 1.0  # Initial uncertainty
+        }
 
     def ida_star(self, start, goal, heuristic, tmax, start_time):
         threshold = heuristic(start)
@@ -219,7 +252,7 @@ class LearnHeuristicPrac:
                 return True
             
             min_t = float('inf')
-            neighbors = get_valid_moves(node)
+            neighbors = get_valid_moves_blocksworld(node)
             total_nodes += len(neighbors)
             
             for neighbor in neighbors:
@@ -250,7 +283,7 @@ class LearnHeuristicPrac:
             return None, total_nodes, planning_time
 
     def uncertainty_aware_heuristic(self, state):
-        x = encode_15puzzle_state(state)
+        x = encode_blocksworld_state(state, self.goal_state)
         x_tensor = torch.tensor(x, dtype=torch.float32).unsqueeze(0)
         self.nnFFNN.eval()
         with torch.no_grad():
@@ -259,7 +292,8 @@ class LearnHeuristicPrac:
             sigma2_a = torch.exp(logvar).item()
         sigma2_t = sigma2_a if y_hat < self.yq else self.epsilon
         h_val = self.h(self.alpha, y_hat, math.sqrt(sigma2_t))
-        return max(h_val, 0)
+        had = self.max_admissible_heuristic(state)
+        return max(h_val, had)
 
     def compute_metrics(self):
         if not self.planner_costs:
@@ -319,20 +353,41 @@ class LearnHeuristicPrac:
         optimizer = optim.Adam(self.nnWUNN.parameters(), lr=0.01)
         early_stop = False
         uncertainties = []
+        
+        # Calculate all uncertainties first
         for x, _ in self.memoryBuffer:
-            sigma2_e = self.nnWUNN.predict_sigma_e(x, K=10)
+            sigma2_e = max(self.nnWUNN.predict_sigma_e(x, K=10), 1e-8)  # Ensure positive
             uncertainties.append(sigma2_e)
-
+        
+        # Normalize uncertainties to reasonable range
+        max_uncertainty = max(uncertainties)
+        if max_uncertainty > 1e8:  # If values are extremely large
+            scale_factor = max_uncertainty / 1e8
+            uncertainties = [u/scale_factor for u in uncertainties]
+        
+        # Calculate weights safely with overflow protection
         weights = []
         for sigma2_e in uncertainties:
-            if sigma2_e >= self.kappa * self.epsilon:
-                weight = math.exp(math.sqrt(sigma2_e))
-            else:
-                weight = math.exp(-1)
-            weights.append(weight)
-
+            try:
+                if sigma2_e >= self.kappa * self.epsilon:
+                    # Safe exponential calculation
+                    exponent = min(math.sqrt(sigma2_e), 50)  # Cap exponent at 50 (e^50 ≈ 5e21)
+                    weight = math.exp(exponent)
+                else:
+                    weight = math.exp(-1)
+                weights.append(weight)
+            except OverflowError:
+                weights.append(1e20)  # Fallback large value
+        
+        # Normalize weights to avoid extreme values
+        max_weight = max(weights)
+        if max_weight > 1e6:
+            weights = [w/max_weight*1e6 for w in weights]
+        
+        # Training loop
         for iter in range(self.MaxTrainIter):
             if iter % 10 == 0:
+                # Early stopping check
                 all_low_uncertainty = True
                 for x, _ in list(self.memoryBuffer)[:100]:
                     sigma2_e = self.nnWUNN.predict_sigma_e(x, 10)
@@ -343,6 +398,7 @@ class LearnHeuristicPrac:
                     early_stop = True
                     break
 
+            # Sample weighted mini-batch
             batch_indices = random.choices(
                 range(len(self.memoryBuffer)),
                 weights=weights,
@@ -350,17 +406,24 @@ class LearnHeuristicPrac:
             )
             batch = [self.memoryBuffer[i] for i in batch_indices]
 
+            # Training step
             total_loss = 0
             for x, y in batch:
                 x_tensor = torch.tensor(x, dtype=torch.float32).unsqueeze(0)
                 y_tensor = torch.tensor([y], dtype=torch.float32).unsqueeze(1)
+                
+                # Forward pass with multiple samples
                 preds = torch.stack(
-                    [self.nnWUNN.forward_single(x_tensor) for _ in range(self.nnWUNN.S)]
+                    [self.nnWUNN.forward_single(x_tensor) for _ in range(self.nnWUNn.S)]
                 )
                 pred_mean = preds.mean(dim=0)
+                
+                # Loss calculation
                 log_likelihood = -F.mse_loss(pred_mean, y_tensor)
                 kl_div = self.nnWUNN.fc1.kl_divergence() + self.nnWUNN.fc2.kl_divergence()
                 loss = self.beta * kl_div - log_likelihood
+                
+                # Backward pass
                 optimizer.zero_grad()
                 loss.backward()
                 optimizer.step()
@@ -407,7 +470,9 @@ class LearnHeuristicPrac:
                     
                     if plan:
                         plan_cost = len(plan) - 1
-                        optimal_cost = manhattan_distance(T["s"], T["sg"])
+                        # For blocksworld, optimal cost is harder to compute exactly,
+                        # so we'll use the number of out-of-place blocks as a lower bound
+                        optimal_cost = count_out_of_place_blocks(T["s"], T["sg"])
                         iter_planner_costs.append(plan_cost)
                         iter_optimal_costs.append(optimal_cost)
                         iter_solved_count += 1
@@ -418,8 +483,8 @@ class LearnHeuristicPrac:
                             self.optimal_solutions_count += 1
                         
                         for state in reversed(plan[:-1]):
-                            x = encode_15puzzle_state(state)
-                            y = manhattan_distance(state, T["sg"])
+                            x = encode_blocksworld_state(state, T["sg"])
+                            y = len(plan) - 1 - plan.index(state)  # Remaining cost
                             self.memoryBuffer.appendleft((x, y))
                             
                 except TimeoutError:
@@ -476,28 +541,37 @@ class LearnHeuristicPrac:
         print(f"All\t{final_avg_alpha:.3f}\t{final_avg_time:.2f}\t{final_avg_subopt:.1f}%\t{final_avg_opt:.1f}%\t{final_avg_nodes:.0f}")
 
 if __name__ == "__main__":
-    goal_state = list(range(16))
-    input_dim = len(encode_15puzzle_state(goal_state))
+    # Define goal state: all blocks in one stack (block 1 on table, 2 on 1, etc.)
+    goal_state = {
+        1: None,   # Block 1 is on table
+        2: 1,       # Block 2 is on block 1
+        3: 2,       # Block 3 is on block 2
+        4: 3,       # Block 4 is on block 3
+        5: 4,       # Block 5 is on block 4
+    }
+    
+    input_dim = 14  # Number of features in our encoding
+    
     params = {
-        "hidden_dim": 20,
-        "dropout_rate": 0.025,
-        "alpha0": 0.95,
+        "hidden_dim": 8,
+        "dropout_rate": 0.0,
+        "alpha0": 0.99,
         "beta0": 0.05,
         "epsilon": 1.0,
         "delta": 0.05,
         "kappa": 0.64,
         "q": 0.95,
-        "K": 5,
+        "K": 10,
         "MaxSteps": 1000,
         "mu0": 0.0,
         "sigma2_0": 10.0,
-        "NumIter": 50,
-        "NumTasksPerIter": 3,
+        "NumIter": 75,
+        "NumTasksPerIter": 5,
         "NumTasksPerIterThresh": 6,
-        "TrainIter": 50,
-        "MaxTrainIter": 200,
+        "TrainIter": 100,
+        "MaxTrainIter": 500,
         "MiniBatchSize": 32,
-        "tmax": 10,
+        "tmax": 10,  # 10 seconds per task
         "MemoryBufferMaxRecords": 5000,
     }
 

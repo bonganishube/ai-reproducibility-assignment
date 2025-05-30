@@ -9,9 +9,7 @@ import time
 from scipy.stats import norm
 from collections import deque, defaultdict
 
-# Define the two sets of disjoint PDB patterns
 PDB_PATTERNS = [
-    # First set of patterns
     [
         [1, 2, 5, 6, 7],
         [3, 4, 8, 9, 14],
@@ -19,7 +17,6 @@ PDB_PATTERNS = [
         [11, 12, 17, 22],
         [13, 18, 23, 24]
     ],
-    # Second set of patterns
     [
         [1, 2, 3, 7, 8],
         [5, 6, 10, 11, 12],
@@ -58,17 +55,15 @@ def compute_pdb_heuristic(state, goal_state, pattern_group):
 def encode_24puzzle_state(state, goal_state):
     features = np.zeros(15)
     
-    # Compute PDB features (f1-f10)
     for i, pattern_set in enumerate(PDB_PATTERNS):
         for j, pattern_group in enumerate(pattern_set):
             features[i*5 + j] = compute_pdb_heuristic(state, goal_state, pattern_group)
     
-    # Rest of the function remains the same
-    features[10] = np.sum(features[:5])  # Sum of first set of PDBs (f11)
-    features[11] = np.sum(features[5:10])  # Sum of second set of PDBs (f12)
-    features[12] = count_out_of_place_tiles(state, goal_state)  # f13
-    features[13] = manhattan_distance(state, goal_state)  # f14
-    features[14] = get_blank_position(state)  # f15
+    features[10] = np.sum(features[:5])
+    features[11] = np.sum(features[5:10])
+    features[12] = count_out_of_place_tiles(state, goal_state)
+    features[13] = manhattan_distance(state, goal_state)
+    features[14] = get_blank_position(state)
     
     return features
 
@@ -148,7 +143,7 @@ class FFNN(nn.Module):
     def __init__(self, input_dim, hidden_dim=8, dropout_rate=0.0):
         super().__init__()
         self.fc1 = nn.Linear(input_dim, hidden_dim)
-        self.fc2 = nn.Linear(hidden_dim, 1)  # Single output node
+        self.fc2 = nn.Linear(hidden_dim, 1)
         self.dropout = nn.Dropout(dropout_rate)
         nn.init.kaiming_normal_(self.fc1.weight, mode="fan_in", nonlinearity="relu")
         nn.init.kaiming_normal_(self.fc2.weight, mode="fan_in", nonlinearity="relu")
@@ -190,7 +185,7 @@ class LearnHeuristicPrac:
 
     def max_admissible_heuristic(self, state):
         x = encode_24puzzle_state(state, self.goal_state)
-        admissible_values = x[:14]  # Features 0-13 are admissible heuristics
+        admissible_values = x[:14]
         return np.max(admissible_values)
 
     def generate_task(self):
@@ -201,7 +196,7 @@ class LearnHeuristicPrac:
         return {
             "s": s_prime,
             "sg": self.goal_state,
-            "sigma2_e": 1.0  # Initial uncertainty
+            "sigma2_e": 1.0
         }
 
     def ida_star(self, start, goal, heuristic, tmax, start_time):
@@ -294,69 +289,57 @@ class LearnHeuristicPrac:
         early_stop = False
         uncertainties = []
         
-        # Calculate all uncertainties first
         for x, _ in self.memoryBuffer:
-            sigma2_e = max(self.nnWUNN.predict_sigma_e(x, K=10), 1e-8)  # Ensure positive
+            sigma2_e = max(self.nnWUNN.predict_sigma_e(x, K=10), 1e-8)
             uncertainties.append(sigma2_e)
         
-        # Normalize uncertainties to reasonable range
         max_uncertainty = max(uncertainties)
-        if max_uncertainty > 1e8:  # If values are extremely large
+        if max_uncertainty > 1e8:
             scale_factor = max_uncertainty / 1e8
             uncertainties = [u/scale_factor for u in uncertainties]
         
-        # Calculate weights safely with overflow protection
         weights = []
         for sigma2_e in uncertainties:
             try:
                 if sigma2_e >= self.kappa * self.epsilon:
-                    # Safe exponential calculation
-                    exponent = min(math.sqrt(sigma2_e), 50)  # Cap exponent at 50 (e^50 ≈ 5e21)
+                    exponent = min(math.sqrt(sigma2_e), 50)
                     weight = math.exp(exponent)
                 else:
                     weight = math.exp(-1)
                 weights.append(weight)
             except OverflowError:
-                weights.append(1e20)  # Fallback large value
+                weights.append(1e20)
         
-        # Normalize weights to avoid extreme values
         max_weight = max(weights)
         if max_weight > 1e6:
             weights = [w/max_weight*1e6 for w in weights]
         
-        # Training loop
-        for iter in range(100):  # Reduced training iterations
-            # Sample weighted mini-batch
+        for iter in range(100):
             batch_indices = random.choices(
                 range(len(self.memoryBuffer)),
                 weights=weights,
                 k=min(self.MiniBatchSize, len(self.memoryBuffer)))
             batch = [self.memoryBuffer[i] for i in batch_indices]
 
-            # Training step
             total_loss = 0
             for x, y in batch:
                 x_tensor = torch.tensor(x, dtype=torch.float32).unsqueeze(0)
                 y_tensor = torch.tensor([y], dtype=torch.float32).unsqueeze(1)
                 
-                # Forward pass with multiple samples
                 preds = torch.stack(
                     [self.nnWUNN.forward_single(x_tensor) for _ in range(self.nnWUNN.S)]
                 )
                 pred_mean = preds.mean(dim=0)
                 
-                # Loss calculation
                 log_likelihood = -F.mse_loss(pred_mean, y_tensor)
                 kl_div = self.nnWUNN.fc1.kl_divergence() + self.nnWUNN.fc2.kl_divergence()
                 loss = self.beta * kl_div - log_likelihood
                 
-                # Backward pass
                 optimizer.zero_grad()
                 loss.backward()
                 optimizer.step()
                 total_loss += loss.item()
 
-            # Early stopping check
             if iter % 10 == 0:
                 if all(s < self.kappa * self.epsilon for s in uncertainties[:100]):
                     early_stop = True
@@ -430,7 +413,6 @@ class LearnHeuristicPrac:
             
             print(f"{n}\t{avg_time_iter:.2f}\t{avg_subopt_pct:.1f}%\t{opt_rate:.1f}%\t{avg_nodes_iter:.0f}")
 
-        # Final statistics
         if self.total_solved_tasks > 0:
             global_subopt = sum((y/y_star-1)*100 for y, y_star in zip(self.planner_costs, self.optimal_costs)) / self.total_solved_tasks
             global_opt_rate = self.optimal_solutions_count / self.total_solved_tasks * 100
@@ -444,8 +426,8 @@ class LearnHeuristicPrac:
         print(f"Optimal solutions: {global_opt_rate:.1f}%")
 
 if __name__ == "__main__":
-    goal_state = list(range(25))  # 0 represents the blank tile
-    input_dim = 15  # Number of features in our encoding
+    goal_state = list(range(25))
+    input_dim = 15
     
     params = {
         "hidden_dim": 8,
